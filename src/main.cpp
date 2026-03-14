@@ -1,9 +1,13 @@
 /**
- * M5Stack CoreS3 语音对话机器人
- * 功能：语音对话 + 网页交互 + 传感器表情 + ESP32控制
- * 硬件：M5Stack CoreS3 + LLM模块
+ * M5Stack CoreS3 语音对话机器人（修复编译错误版）
+ * 修复内容：
+ * 1. 修复CoreS3库API兼容问题（Microphone → Audio）
+ * 2. 修复ArduinoJson版本兼容问题（DynamicJsonDocument → JsonDocument）
+ * 3. 修复按键API兼容问题（isPressed → wasPressed）
+ * 4. 移除本地麦克风初始化，使用LLM模块自带录音功能
  */
 
+#define CAMERA_MODEL_M5STACK_CORES3
 #include <M5CoreS3.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -110,8 +114,8 @@ void initHardware() {
   // 初始化IMU
   CoreS3.Imu.begin();
   
-  // 初始化麦克风
-  CoreS3.Microphone.begin();
+  // 初始化音频系统（替代Microphone）
+  CoreS3.Audio.begin();
   
   // 初始化扬声器
   CoreS3.Speaker.begin();
@@ -496,7 +500,7 @@ void processVoiceInput() {
   CoreS3.Display.print("Recording...");
   CoreS3.Speaker.tone(1000, 100);
   
-  // 启动语音识别
+  // 启动语音识别（LLM模块自带录音功能）
   LLMModule.println("AT+ASR=START");
   String asrResult = "";
   uint32_t start = millis();
@@ -715,7 +719,7 @@ void handleWebChat() {
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
   if (type == WStype_TEXT) {
     String msg = String((char*)payload);
-    DynamicJsonDocument doc(1024);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, msg);
     
     if (!error && doc["type"] == "chat") {
@@ -786,7 +790,7 @@ void loop() {
   drawUI();
   
   // 处理M5按键（按住说话）
-  if (CoreS3.BtnA.isPressed() && currentApp == APP_CHAT) {
+  if (CoreS3.BtnA.wasPressed() && currentApp == APP_CHAT) {
     processVoiceInput();
   }
   
