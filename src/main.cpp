@@ -227,28 +227,31 @@ void drawChat(bool fullRedraw) {
     CoreS3.Display.fillScreen(BLACK);
     
     // 顶部栏
-    CoreS3.Display.fillRect(0, 0, 320, 30, 0x45FD);
+    CoreS3.Display.fillRect(0, 0, 320, 40, 0x45FD);
     CoreS3.Display.setTextColor(WHITE);
-    CoreS3.Display.setTextSize(1.5);
-    CoreS3.Display.setCursor(10, 7);
+    CoreS3.Display.setTextSize(1.8);
+    CoreS3.Display.setCursor(15, 10);
     CoreS3.Display.print("Voice Chat");
     
-    // 返回按钮
-    CoreS3.Display.fillCircle(300, 15, 10, RED);
-    CoreS3.Display.setCursor(296, 8);
+    // 返回按钮（加大尺寸）
+    CoreS3.Display.fillRoundRect(260, 5, 50, 30, 8, RED);
+    CoreS3.Display.setTextSize(2);
+    CoreS3.Display.setCursor(278, 10);
     CoreS3.Display.print("<");
     
     // 对话区域边框
     CoreS3.Display.drawRect(10, 35, 300, 170, 0x45FD);
     
     // 底部栏
-    CoreS3.Display.fillRect(0, 210, 320, 30, 0x2945);
+    CoreS3.Display.fillRect(0, 200, 320, 40, 0x2945);
     CoreS3.Display.setTextColor(WHITE);
-    CoreS3.Display.setCursor(10, 218);
+    CoreS3.Display.setTextSize(1.3);
+    CoreS3.Display.setCursor(15, 212);
     CoreS3.Display.print("Tap mic to speak");
     
-    // 语音按钮
-    CoreS3.Display.fillCircle(280, 225, 12, GREEN);
+    // 语音按钮（加大尺寸）
+    CoreS3.Display.fillCircle(280, 220, 18, GREEN);
+    CoreS3.Display.drawCircle(280, 220, 20, WHITE);
   }
   
   // 只在对话更新时刷新对话区域
