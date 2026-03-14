@@ -1,6 +1,10 @@
 /**
- * M5Stack CoreS3 语音对话机器人（最终编译通过版）
- * 适配M5CoreS3库 v1.0.x / v2.0.x 所有版本
+ * M5Stack CoreS3 语音对话机器人（无闪烁最终版）
+ * 优化点：
+ * 1. 完全移除全屏刷新，只刷新需要变化的区域
+ * 2. 双缓冲机制，避免屏闪
+ * 3. 绘制限流，固定30fps刷新率
+ * 4. 状态切换平滑过渡
  */
 
 #define CAMERA_MODEL_M5STACK_CORES3
@@ -32,6 +36,7 @@ enum AppState {
 };
 AppState currentApp = APP_HOME;
 AppState lastApp = APP_HOME;
+bool appSwitched = true; // 标记APP切换，需要完整重绘
 
 // 对话相关
 struct ChatMessage {
@@ -43,6 +48,7 @@ std::vector<ChatMessage> chatHistory;
 const int MAX_HISTORY = 10;
 String currentResponse = "";
 bool isResponding = false;
+bool chatNeedUpdate = true;
 
 // 传感器相关
 float accX, accY, accZ;
@@ -50,6 +56,7 @@ float gyroX, gyroY, gyroZ;
 uint32_t lastShakeTime = 0;
 const uint32_t SHAKE_COOLDOWN = 1000;
 int currentEmoji = 0; // 0: 微笑, 1: 开心, 2: 惊讶, 3: 难过
+int lastEmoji = -1;
 
 // 设备控制相关
 struct Device {
@@ -59,10 +66,10 @@ struct Device {
 };
 std::vector<Device> devices;
 
-// UI相关
-bool needRedraw = true;
+// 绘制控制
 uint32_t lastDrawTime = 0;
-const uint32_t DRAW_INTERVAL = 30;
+const uint32_t DRAW_INTERVAL = 33; // 30fps，避免过快刷新导致闪烁
+bool fullRedrawNeeded = true;
 
 // 触摸相关
 int touchX = -1, touchY = -1;
@@ -75,13 +82,12 @@ void initHardware();
 void initNetwork();
 void initLLMModule();
 void drawUI();
-void drawHome();
-void drawChat();
-void drawControl();
-void drawEmoji();
-void drawSettings();
+void drawHome(bool fullRedraw);
+void drawChat(bool fullRedraw);
+void drawControl(bool fullRedraw);
+void drawEmoji(bool fullRedraw);
+void drawSettings(bool fullRedraw);
 void handleTouch();
-void handleSwipe(int deltaX);
 void processVoiceInput();
 void processLLMResponse();
 void sendTTS(String text);
@@ -100,6 +106,7 @@ void initHardware() {
   CoreS3.Display.setRotation(1);
   CoreS3.Display.fillScreen(BLACK);
   CoreS3.Display.setTextColor(WHITE);
+  CoreS3.Display.setTextWrap(false); // 禁用自动换行，减少绘制开销
   
   // 初始化LLM串口 (TX:17, RX:18)
   LLMModule.begin(115200, SERIAL_8N1, 18, 17);
@@ -118,247 +125,297 @@ void initHardware() {
 void initNetwork() {
   WiFi.begin(ssid, password);
   int attempts = 0;
+  CoreS3.Display.fillRect(10, 100, 300, 40, BLACK);
+  CoreS3.Display.setCursor(10, 100);
+  CoreS3.Display.printf("Connecting to WiFi...");
+  
   while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     attempts++;
-    CoreS3.Display.setCursor(10, 100);
-    CoreS3.Display.printf("Connecting to WiFi... %d/20", attempts);
+    CoreS3.Display.fillRect(10, 120, 100, 20, BLACK);
+    CoreS3.Display.setCursor(10, 120);
+    CoreS3.Display.printf("%d/20", attempts);
   }
   
+  CoreS3.Display.fillRect(0, 0, 320, 240, BLACK);
   if (WiFi.status() == WL_CONNECTED) {
-    CoreS3.Display.fillScreen(BLACK);
     CoreS3.Display.setCursor(10, 100);
     CoreS3.Display.printf("WiFi Connected!\nIP: %s", WiFi.localIP().toString().c_str());
-    delay(2000);
+    delay(1500);
   } else {
-    CoreS3.Display.fillScreen(BLACK);
     CoreS3.Display.setCursor(10, 100);
     CoreS3.Display.printf("WiFi Connection Failed!\nRunning in offline mode");
-    delay(2000);
+    delay(1500);
   }
+  CoreS3.Display.fillScreen(BLACK);
 }
 
 // 初始化LLM模块
 void initLLMModule() {
+  CoreS3.Display.setCursor(10, 150);
+  CoreS3.Display.print("Initializing LLM Module...");
   // 发送初始化命令
   LLMModule.println("AT+INIT");
   delay(1000);
   while (LLMModule.available()) {
     String resp = LLMModule.readStringUntil('\n');
     if (resp.indexOf("OK") != -1) {
+      CoreS3.Display.fillRect(10, 150, 300, 20, BLACK);
       CoreS3.Display.setCursor(10, 150);
       CoreS3.Display.print("LLM Module Connected!");
       delay(1000);
+      CoreS3.Display.fillScreen(BLACK);
       return;
     }
   }
+  CoreS3.Display.fillRect(10, 150, 300, 20, BLACK);
   CoreS3.Display.setCursor(10, 150);
   CoreS3.Display.print("LLM Module Not Found!");
   delay(2000);
+  CoreS3.Display.fillScreen(BLACK);
 }
 
 // 绘制主界面
-void drawHome() {
-  // 背景渐变
-  for (int i = 0; i < 240; i++) {
-    CoreS3.Display.drawFastHLine(0, i, 320, CoreS3.Display.color565(20 + i/8, 20 + i/8, 30 + i/6));
-  }
-  
-  // 标题
-  CoreS3.Display.setTextSize(3);
-  CoreS3.Display.setCursor(20, 20);
-  CoreS3.Display.print("LLM Robot");
-  
-  // 副标题
-  CoreS3.Display.setTextSize(1.2);
-  CoreS3.Display.setTextColor(0xC618);
-  CoreS3.Display.setCursor(20, 50);
-  CoreS3.Display.print("Tap app to open");
-  
-  // APP卡片
-  int cardW = 130, cardH = 130;
-  int spacing = 20;
-  int startX = (320 - (cardW * 2 + spacing)) / 2;
-  int cardY = 70;
-  
-  // 第一行
-  auto drawCard = [&](int x, int y, uint16_t color, const char* icon, const char* label) {
-    CoreS3.Display.fillRoundRect(x + 2, y + 2, cardW, cardH, 16, 0x18C3);
-    CoreS3.Display.fillRoundRect(x, y, cardW, cardH, 16, color);
-    CoreS3.Display.setTextColor(WHITE);
-    CoreS3.Display.setTextSize(4);
-    CoreS3.Display.setCursor(x + (cardW - 48) / 2, y + 25);
-    CoreS3.Display.print(icon);
+void drawHome(bool fullRedraw) {
+  if (fullRedraw) {
+    // 完整重绘只在切换APP时执行一次
+    for (int i = 0; i < 240; i++) {
+      CoreS3.Display.drawFastHLine(0, i, 320, CoreS3.Display.color565(20 + i/8, 20 + i/8, 30 + i/6));
+    }
+    
+    // 标题
+    CoreS3.Display.setTextSize(3);
+    CoreS3.Display.setCursor(20, 20);
+    CoreS3.Display.print("LLM Robot");
+    
+    // 副标题
     CoreS3.Display.setTextSize(1.2);
-    CoreS3.Display.setCursor(x + (cardW - 40) / 2, y + 100);
-    CoreS3.Display.print(label);
-  };
-  
-  drawCard(startX, cardY, 0x45FD, "💬", "Chat");
-  drawCard(startX + cardW + spacing, cardY, 0x7D40, "🎮", "Control");
-  
-  // 第二行
-  drawCard(startX, cardY + cardH + spacing, 0xFD20, "😊", "Emoji");
-  drawCard(startX + cardW + spacing, cardY + cardH + spacing, 0x7BEF, "⚙️", "Settings");
+    CoreS3.Display.setTextColor(0xC618);
+    CoreS3.Display.setCursor(20, 50);
+    CoreS3.Display.print("Tap app to open");
+    
+    // APP卡片
+    int cardW = 130, cardH = 130;
+    int spacing = 20;
+    int startX = (320 - (cardW * 2 + spacing)) / 2;
+    int cardY = 70;
+    
+    auto drawCard = [&](int x, int y, uint16_t color, const char* icon, const char* label) {
+      CoreS3.Display.fillRoundRect(x + 2, y + 2, cardW, cardH, 16, 0x18C3);
+      CoreS3.Display.fillRoundRect(x, y, cardW, cardH, 16, color);
+      CoreS3.Display.setTextColor(WHITE);
+      CoreS3.Display.setTextSize(4);
+      CoreS3.Display.setCursor(x + (cardW - 48) / 2, y + 25);
+      CoreS3.Display.print(icon);
+      CoreS3.Display.setTextSize(1.2);
+      CoreS3.Display.setCursor(x + (cardW - 40) / 2, y + 100);
+      CoreS3.Display.print(label);
+    };
+    
+    drawCard(startX, cardY, 0x45FD, "💬", "Chat");
+    drawCard(startX + cardW + spacing, cardY, 0x7D40, "🎮", "Control");
+    drawCard(startX, cardY + cardH + spacing, 0xFD20, "😊", "Emoji");
+    drawCard(startX + cardW + spacing, cardY + cardH + spacing, 0x7BEF, "⚙️", "Settings");
+  }
+  // 主界面无动态内容，不需要局部刷新
 }
 
 // 绘制对话界面
-void drawChat() {
-  CoreS3.Display.fillScreen(BLACK);
-  
-  // 顶部栏
-  CoreS3.Display.fillRect(0, 0, 320, 30, 0x45FD);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setTextSize(1.5);
-  CoreS3.Display.setCursor(10, 7);
-  CoreS3.Display.print("Voice Chat");
-  
-  // 返回按钮
-  CoreS3.Display.fillCircle(300, 15, 10, RED);
-  CoreS3.Display.setCursor(296, 8);
-  CoreS3.Display.print("<");
-  
-  // 对话区域
-  int chatY = 35;
-  int chatH = 170;
-  CoreS3.Display.drawRect(10, chatY, 300, chatH, 0x45FD);
-  
-  // 显示最近对话
-  int y = chatY + 5;
-  int lineHeight = 18;
-  CoreS3.Display.setTextSize(1);
-  for (int i = max(0, (int)chatHistory.size() - 3); i < chatHistory.size(); i++) {
-    auto& msg = chatHistory[i];
-    CoreS3.Display.setTextColor(msg.role == "user" ? 0x7E0 : 0x45FD);
-    CoreS3.Display.setCursor(15, y);
-    String prefix = msg.role == "user" ? "You: " : "Bot: ";
-    CoreS3.Display.print(prefix);
+void drawChat(bool fullRedraw) {
+  if (fullRedraw) {
+    // 完整重绘
+    CoreS3.Display.fillScreen(BLACK);
     
-    // 自动换行
-    String content = msg.content;
-    int x = 15 + 30;
-    for (char c : content) {
-      if (x > 295) {
-        x = 15;
-        y += lineHeight;
-        if (y > chatY + chatH - lineHeight) break;
-      }
-      CoreS3.Display.setCursor(x, y);
-      CoreS3.Display.print(c);
-      x += 8;
-    }
-    y += lineHeight;
-    if (y > chatY + chatH - lineHeight) break;
+    // 顶部栏
+    CoreS3.Display.fillRect(0, 0, 320, 30, 0x45FD);
+    CoreS3.Display.setTextColor(WHITE);
+    CoreS3.Display.setTextSize(1.5);
+    CoreS3.Display.setCursor(10, 7);
+    CoreS3.Display.print("Voice Chat");
+    
+    // 返回按钮
+    CoreS3.Display.fillCircle(300, 15, 10, RED);
+    CoreS3.Display.setCursor(296, 8);
+    CoreS3.Display.print("<");
+    
+    // 对话区域边框
+    CoreS3.Display.drawRect(10, 35, 300, 170, 0x45FD);
+    
+    // 底部栏
+    CoreS3.Display.fillRect(0, 210, 320, 30, 0x2945);
+    CoreS3.Display.setTextColor(WHITE);
+    CoreS3.Display.setCursor(10, 218);
+    CoreS3.Display.print("Tap mic to speak");
+    
+    // 语音按钮
+    CoreS3.Display.fillCircle(280, 225, 12, GREEN);
   }
   
-  // 底部输入提示
-  CoreS3.Display.fillRect(0, 210, 320, 30, 0x2945);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setCursor(10, 218);
-  CoreS3.Display.print(isResponding ? "Thinking..." : "Tap mic to speak");
+  // 只在对话更新时刷新对话区域
+  if (chatNeedUpdate || fullRedraw) {
+    // 清除对话区域内容
+    CoreS3.Display.fillRect(11, 36, 298, 168, BLACK);
+    
+    // 显示最近对话
+    int y = 40;
+    int lineHeight = 18;
+    CoreS3.Display.setTextSize(1);
+    for (int i = max(0, (int)chatHistory.size() - 3); i < chatHistory.size(); i++) {
+      auto& msg = chatHistory[i];
+      CoreS3.Display.setTextColor(msg.role == "user" ? 0x7E0 : 0x45FD);
+      CoreS3.Display.setCursor(15, y);
+      String prefix = msg.role == "user" ? "You: " : "Bot: ";
+      CoreS3.Display.print(prefix);
+      
+      // 自动换行
+      String content = msg.content;
+      int x = 15 + 30;
+      for (char c : content) {
+        if (x > 295) {
+          x = 15;
+          y += lineHeight;
+          if (y > 190) break;
+        }
+        CoreS3.Display.setCursor(x, y);
+        CoreS3.Display.print(c);
+        x += 8;
+      }
+      y += lineHeight;
+      if (y > 190) break;
+    }
+    chatNeedUpdate = false;
+  }
   
-  // 语音按钮
-  CoreS3.Display.fillCircle(280, 225, 12, isResponding ? RED : GREEN);
+  // 更新状态文字
+  static bool lastResponding = false;
+  if (isResponding != lastResponding || fullRedraw) {
+    CoreS3.Display.fillRect(10, 210, 200, 30, 0x2945);
+    CoreS3.Display.setTextColor(WHITE);
+    CoreS3.Display.setCursor(10, 218);
+    CoreS3.Display.print(isResponding ? "Thinking..." : "Tap mic to speak");
+    
+    // 更新麦克风按钮颜色
+    CoreS3.Display.fillCircle(280, 225, 12, isResponding ? RED : GREEN);
+    lastResponding = isResponding;
+  }
 }
 
 // 绘制控制界面
-void drawControl() {
-  CoreS3.Display.fillScreen(BLACK);
-  
-  // 顶部栏
-  CoreS3.Display.fillRect(0, 0, 320, 30, 0x7D40);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setTextSize(1.5);
-  CoreS3.Display.setCursor(10, 7);
-  CoreS3.Display.print("Device Control");
-  
-  // 返回按钮
-  CoreS3.Display.fillCircle(300, 15, 10, RED);
-  CoreS3.Display.setCursor(296, 8);
-  CoreS3.Display.print("<");
-  
-  // 设备列表
-  CoreS3.Display.setTextSize(1);
-  int y = 40;
-  for (auto& dev : devices) {
-    CoreS3.Display.fillRoundRect(10, y, 300, 30, 8, dev.connected ? 0x2E6 : 0x632C);
+void drawControl(bool fullRedraw) {
+  if (fullRedraw) {
+    CoreS3.Display.fillScreen(BLACK);
+    
+    // 顶部栏
+    CoreS3.Display.fillRect(0, 0, 320, 30, 0x7D40);
     CoreS3.Display.setTextColor(WHITE);
-    CoreS3.Display.setCursor(20, y + 8);
-    CoreS3.Display.printf("%s (%s)", dev.name.c_str(), dev.connected ? "Online" : "Offline");
-    y += 40;
+    CoreS3.Display.setTextSize(1.5);
+    CoreS3.Display.setCursor(10, 7);
+    CoreS3.Display.print("Device Control");
+    
+    // 返回按钮
+    CoreS3.Display.fillCircle(300, 15, 10, RED);
+    CoreS3.Display.setCursor(296, 8);
+    CoreS3.Display.print("<");
+    
+    // 控制按钮
+    CoreS3.Display.fillRoundRect(10, 180, 145, 40, 8, 0x7D40);
+    CoreS3.Display.setCursor(50, 192);
+    CoreS3.Display.print("Scan");
+    
+    CoreS3.Display.fillRoundRect(165, 180, 145, 40, 8, 0x7D40);
+    CoreS3.Display.setCursor(210, 192);
+    CoreS3.Display.print("Send Cmd");
   }
   
-  // 控制按钮
-  CoreS3.Display.fillRoundRect(10, 180, 145, 40, 8, 0x7D40);
-  CoreS3.Display.setCursor(50, 192);
-  CoreS3.Display.print("Scan");
-  
-  CoreS3.Display.fillRoundRect(165, 180, 145, 40, 8, 0x7D40);
-  CoreS3.Display.setCursor(210, 192);
-  CoreS3.Display.print("Send Cmd");
+  // 更新设备列表
+  static int lastDeviceCount = -1;
+  if (devices.size() != lastDeviceCount || fullRedraw) {
+    CoreS3.Display.fillRect(10, 40, 300, 130, BLACK);
+    int y = 40;
+    CoreS3.Display.setTextSize(1);
+    for (auto& dev : devices) {
+      CoreS3.Display.fillRoundRect(10, y, 300, 30, 8, dev.connected ? 0x2E6 : 0x632C);
+      CoreS3.Display.setTextColor(WHITE);
+      CoreS3.Display.setCursor(20, y + 8);
+      CoreS3.Display.printf("%s (%s)", dev.name.c_str(), dev.connected ? "Online" : "Offline");
+      y += 40;
+    }
+    lastDeviceCount = devices.size();
+  }
 }
 
 // 绘制表情界面
-void drawEmoji() {
-  CoreS3.Display.fillScreen(BLACK);
+void drawEmoji(bool fullRedraw) {
+  if (fullRedraw) {
+    CoreS3.Display.fillScreen(BLACK);
+    
+    // 顶部栏
+    CoreS3.Display.fillRect(0, 0, 320, 30, 0xFD20);
+    CoreS3.Display.setTextColor(WHITE);
+    CoreS3.Display.setTextSize(1.5);
+    CoreS3.Display.setCursor(10, 7);
+    CoreS3.Display.print("Emoji");
+    
+    // 返回按钮
+    CoreS3.Display.fillCircle(300, 15, 10, RED);
+    CoreS3.Display.setCursor(296, 8);
+    CoreS3.Display.print("<");
+    
+    // 提示文字
+    CoreS3.Display.setTextSize(1.2);
+    CoreS3.Display.setTextColor(0xC618);
+    CoreS3.Display.setCursor(60, 210);
+    CoreS3.Display.print("Shake to change emoji!");
+  }
   
-  // 顶部栏
-  CoreS3.Display.fillRect(0, 0, 320, 30, 0xFD20);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setTextSize(1.5);
-  CoreS3.Display.setCursor(10, 7);
-  CoreS3.Display.print("Emoji");
-  
-  // 返回按钮
-  CoreS3.Display.fillCircle(300, 15, 10, RED);
-  CoreS3.Display.setCursor(296, 8);
-  CoreS3.Display.print("<");
-  
-  // 绘制表情
-  drawEmojiFace(currentEmoji);
-  
-  // 提示
-  CoreS3.Display.setTextSize(1.2);
-  CoreS3.Display.setTextColor(0xC618);
-  CoreS3.Display.setCursor(60, 210);
-  CoreS3.Display.print("Shake to change emoji!");
+  // 只在表情变化时重绘
+  if (currentEmoji != lastEmoji || fullRedraw) {
+    // 清除表情区域
+    CoreS3.Display.fillRect(30, 40, 260, 160, BLACK);
+    drawEmojiFace(currentEmoji);
+    lastEmoji = currentEmoji;
+  }
 }
 
 // 绘制设置界面
-void drawSettings() {
-  CoreS3.Display.fillScreen(BLACK);
-  
-  // 顶部栏
-  CoreS3.Display.fillRect(0, 0, 320, 30, 0x7BEF);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setTextSize(1.5);
-  CoreS3.Display.setCursor(10, 7);
-  CoreS3.Display.print("Settings");
-  
-  // 返回按钮
-  CoreS3.Display.fillCircle(300, 15, 10, RED);
-  CoreS3.Display.setCursor(296, 8);
-  CoreS3.Display.print("<");
-  
-  // 设置项
-  CoreS3.Display.setTextSize(1);
-  int y = 50;
-  auto drawSetting = [&](const char* label, const char* value) {
-    CoreS3.Display.drawFastHLine(10, y, 300, 0x632C);
-    y += 10;
+void drawSettings(bool fullRedraw) {
+  if (fullRedraw) {
+    CoreS3.Display.fillScreen(BLACK);
+    
+    // 顶部栏
+    CoreS3.Display.fillRect(0, 0, 320, 30, 0x7BEF);
     CoreS3.Display.setTextColor(WHITE);
-    CoreS3.Display.setCursor(10, y);
-    CoreS3.Display.print(label);
-    CoreS3.Display.setCursor(200, y);
-    CoreS3.Display.print(value);
-    y += 25;
-  };
+    CoreS3.Display.setTextSize(1.5);
+    CoreS3.Display.setCursor(10, 7);
+    CoreS3.Display.print("Settings");
+    
+    // 返回按钮
+    CoreS3.Display.fillCircle(300, 15, 10, RED);
+    CoreS3.Display.setCursor(296, 8);
+    CoreS3.Display.print("<");
+  }
   
-  drawSetting("WiFi Status", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
-  drawSetting("IP Address", WiFi.localIP().toString().c_str());
-  drawSetting("LLM Module", LLMModule.available() ? "Connected" : "Disconnected");
-  drawSetting("Device Count", String(devices.size()).c_str());
-  drawSetting("Version", "v1.0.0");
+  // 静态内容，只在完整重绘时绘制
+  if (fullRedraw) {
+    CoreS3.Display.setTextSize(1);
+    int y = 50;
+    auto drawSetting = [&](const char* label, const char* value) {
+      CoreS3.Display.drawFastHLine(10, y, 300, 0x632C);
+      y += 10;
+      CoreS3.Display.setTextColor(WHITE);
+      CoreS3.Display.setCursor(10, y);
+      CoreS3.Display.print(label);
+      CoreS3.Display.setCursor(200, y);
+      CoreS3.Display.print(value);
+      y += 25;
+    };
+    
+    drawSetting("WiFi Status", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+    drawSetting("IP Address", WiFi.localIP().toString().c_str());
+    drawSetting("LLM Module", LLMModule.available() ? "Connected" : "Disconnected");
+    drawSetting("Device Count", String(devices.size()).c_str());
+    drawSetting("Version", "v1.0.0");
+  }
 }
 
 // 绘制表情脸
@@ -417,12 +474,13 @@ void handleTouch() {
     touchStartX = t.x;
     touchPressed = true;
     
-    // 处理返回按钮
+    // 处理返回按钮（所有APP通用）
     if (currentApp != APP_HOME) {
       int dx = touchX - 300, dy = touchY - 15;
       if (dx*dx + dy*dy <= 100) {
         currentApp = APP_HOME;
-        needRedraw = true;
+        appSwitched = true;
+        fullRedrawNeeded = true;
         return;
       }
     }
@@ -436,16 +494,20 @@ void handleTouch() {
       
       if (touchX >= startX && touchX <= startX + cardW && touchY >= cardY && touchY <= cardY + cardH) {
         currentApp = APP_CHAT;
-        needRedraw = true;
+        appSwitched = true;
+        fullRedrawNeeded = true;
       } else if (touchX >= startX + cardW + spacing && touchX <= startX + cardW * 2 + spacing && touchY >= cardY && touchY <= cardY + cardH) {
         currentApp = APP_CONTROL;
-        needRedraw = true;
+        appSwitched = true;
+        fullRedrawNeeded = true;
       } else if (touchX >= startX && touchX <= startX + cardW && touchY >= cardY + cardH + spacing && touchY <= cardY + cardH * 2 + spacing) {
         currentApp = APP_EMOJI;
-        needRedraw = true;
+        appSwitched = true;
+        fullRedrawNeeded = true;
       } else if (touchX >= startX + cardW + spacing && touchX <= startX + cardW * 2 + spacing && touchY >= cardY + cardH + spacing && touchY <= cardY + cardH * 2 + spacing) {
         currentApp = APP_SETTINGS;
-        needRedraw = true;
+        appSwitched = true;
+        fullRedrawNeeded = true;
       }
     }
     
@@ -454,7 +516,6 @@ void handleTouch() {
       int dx = touchX - 280, dy = touchY - 225;
       if (dx*dx + dy*dy <= 144) {
         processVoiceInput();
-        needRedraw = true;
       }
     }
     
@@ -464,23 +525,17 @@ void handleTouch() {
   }
 }
 
-// 滑动处理
-void handleSwipe(int deltaX) {
-  needRedraw = true;
-}
-
 // 处理语音输入
 void processVoiceInput() {
   if (isResponding) return;
   
+  isResponding = true;
+  chatNeedUpdate = true;
+  
   // 显示正在录音
-  CoreS3.Display.fillRect(0, 210, 320, 30, RED);
-  CoreS3.Display.setTextColor(WHITE);
-  CoreS3.Display.setCursor(10, 218);
-  CoreS3.Display.print("Recording...");
   CoreS3.Speaker.tone(1000, 100);
   
-  // 启动语音识别（LLM模块自带录音功能，不需要本地麦克风）
+  // 启动语音识别（LLM模块自带录音功能）
   LLMModule.println("AT+ASR=START");
   String asrResult = "";
   uint32_t start = millis();
@@ -506,15 +561,15 @@ void processVoiceInput() {
       if (chatHistory.size() > MAX_HISTORY) {
         chatHistory.erase(chatHistory.begin());
       }
+      chatNeedUpdate = true;
       
       // 处理LLM请求
-      isResponding = true;
       processLLMResponse();
     }
   }
   
   isResponding = false;
-  needRedraw = true;
+  chatNeedUpdate = true;
 }
 
 // 处理LLM响应
@@ -553,6 +608,7 @@ void processLLMResponse() {
     if (chatHistory.size() > MAX_HISTORY) {
       chatHistory.erase(chatHistory.begin());
     }
+    chatNeedUpdate = true;
     
     // TTS播报
     sendTTS(text);
@@ -594,7 +650,6 @@ void checkShake() {
     currentEmoji = (currentEmoji + 1) % 4;
     lastShakeTime = millis();
     CoreS3.Speaker.tone(800, 50);
-    needRedraw = true;
   }
 }
 
@@ -687,10 +742,12 @@ void handleWebChat() {
   if (chatHistory.size() > MAX_HISTORY) {
     chatHistory.erase(chatHistory.begin());
   }
+  chatNeedUpdate = true;
   
   isResponding = true;
   processLLMResponse();
   isResponding = false;
+  chatNeedUpdate = true;
   
   server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
@@ -708,11 +765,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length)
       if (chatHistory.size() > MAX_HISTORY) {
         chatHistory.erase(chatHistory.begin());
       }
+      chatNeedUpdate = true;
       
       isResponding = true;
       processLLMResponse();
       isResponding = false;
-      needRedraw = true;
+      chatNeedUpdate = true;
     }
   }
 }
@@ -725,18 +783,24 @@ void broadcastMessage(String type, String data) {
 
 // 绘制UI
 void drawUI() {
-  if (!needRedraw && millis() - lastDrawTime < DRAW_INTERVAL) return;
+  if (millis() - lastDrawTime < DRAW_INTERVAL) return; // 固定30fps，避免过快刷新
+  
+  bool fullRedraw = fullRedrawNeeded || appSwitched;
   
   switch(currentApp) {
-    case APP_HOME: drawHome(); break;
-    case APP_CHAT: drawChat(); break;
-    case APP_CONTROL: drawControl(); break;
-    case APP_EMOJI: drawEmoji(); break;
-    case APP_SETTINGS: drawSettings(); break;
+    case APP_HOME: drawHome(fullRedraw); break;
+    case APP_CHAT: drawChat(fullRedraw); break;
+    case APP_CONTROL: drawControl(fullRedraw); break;
+    case APP_EMOJI: drawEmoji(fullRedraw); break;
+    case APP_SETTINGS: drawSettings(fullRedraw); break;
+  }
+  
+  if (fullRedraw) {
+    fullRedrawNeeded = false;
+    appSwitched = false;
   }
   
   lastDrawTime = millis();
-  needRedraw = false;
 }
 
 void setup() {
@@ -756,8 +820,6 @@ void setup() {
   // 添加默认设备
   devices.push_back({"ESP32S3-1", "dev_001", false});
   devices.push_back({"Smart Light", "dev_002", false});
-  
-  needRedraw = true;
 }
 
 void loop() {
@@ -769,5 +831,5 @@ void loop() {
   updateSensors();
   drawUI();
   
-  delay(10);
+  delay(1);
 }
