@@ -133,6 +133,7 @@ void handleWebChat();
 void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length);
 void broadcastMessage(String type, String data);
 void llmTask(void *arg);
+void updateSensors();
 
 // ========== 颜色定义 ==========
 const uint16_t BG_COLOR     = M5.Display.color565(250, 250, 250);  // 背景白色
@@ -268,9 +269,9 @@ void drawHomeLauncher() {
     int dotR = 4;
     int spacing = 12;
     int start = centerX - spacing / 2;
-    M5.Display.drawCircle(start, y, dotR, currentAppPage == 0 ? CARD_BORDER : CARD_BORDER);
+    M5.Display.drawCircle(start, y, dotR, CARD_BORDER);
     M5.Display.fillCircle(start, y, dotR + (currentAppPage == 0 ? 2 : 0), currentAppPage == 0 ? apps[0].color : CARD_BORDER);
-    M5.Display.drawCircle(start + spacing, y, dotR, currentAppPage == 1 ? CARD_BORDER : CARD_BORDER);
+    M5.Display.drawCircle(start + spacing, y, dotR, CARD_BORDER);
     M5.Display.fillCircle(start + spacing, y, dotR + (currentAppPage == 1 ? 2 : 0), currentAppPage == 1 ? apps[2].color : CARD_BORDER);
 }
 
@@ -557,11 +558,11 @@ void drawUI() {
     if (currentAppPage == 0) {
         drawHomeLauncher();
     } else {
-        switch((currentAppPage - 1) * 2 + 0) {
+        switch(currentAppPage - 1) {
             case 0: drawChatApp(); break;
-            case 2: drawControlApp(); break;
-            case 4: drawEmojiApp(); break;
-            case 6: drawSettingsApp(); break;
+            case 1: drawControlApp(); break;
+            case 2: drawEmojiApp(); break;
+            case 3: drawSettingsApp(); break;
         }
     }
 
@@ -602,23 +603,9 @@ void handleTouch() {
                     M5.Display.display();
                     delay(80);
                     // 点击进入app
-                    if (i == 0) {
-                        currentAppPage = 1;
-                        fullRedrawNeeded = true;
-                        M5.Speaker.tone(600, 60);
-                    } else if (i == 1) {
-                        currentAppPage = 1;
-                        fullRedrawNeeded = true;
-                        M5.Speaker.tone(600, 60);
-                    } else if (i == 2) {
-                        currentAppPage = 1;
-                        fullRedrawNeeded = true;
-                        M5.Speaker.tone(600, 60);
-                    } else if (i == 3) {
-                        currentAppPage = 1;
-                        fullRedrawNeeded = true;
-                        M5.Speaker.tone(600, 60);
-                    }
+                    currentAppPage = i + 1;
+                    fullRedrawNeeded = true;
+                    M5.Speaker.tone(600, 60);
                     return;
                 }
             }
@@ -650,7 +637,7 @@ void handleTouch() {
                 }
             } else {
                 // 向左滑 - 下一页
-                if (currentAppPage < 1) {  // 现在只有一页app（4个app在一页，第二页放未来扩展）
+                if (currentAppPage < MAX_APPS) {
                     currentAppPage++;
                     fullRedrawNeeded = true;
                     M5.Speaker.tone(700, 50);
@@ -733,4 +720,31 @@ void processLlmInference(String asrText) {
     }
     prompt += "assistant: ";
 
-    module_ll
+    module_llm.llm.inference(workIds.llm, prompt);
+}
+
+// ========== 更新传感器 ==========
+void updateSensors() {
+    M5.Imu.getAccel(&accX, &accY, &accZ);
+    M5.Imu.getGyro(&gyroX, &gyroY, &gyroZ);
+
+    // 只在表情页检测摇晃
+    if (currentAppPage == 1 && (currentAppPage - 1) == 2) {
+        if (millis() - lastShakeTime < SHAKE_COOLDOWN) return;
+
+        float totalAcc = sqrt(accX*accX + accY*accY + accZ*accZ);
+        if (totalAcc > 2.5) {
+            currentEmoji = (currentEmoji + 1) % 4;
+            lastShakeTime = millis();
+            M5.Speaker.tone(800, 50);
+        }
+    }
+}
+
+// ========== Web主页 ==========
+void handleWebRoot() {
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta
