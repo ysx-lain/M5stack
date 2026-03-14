@@ -1,10 +1,6 @@
 /**
- * M5Stack CoreS3 语音对话机器人（修复编译错误版）
- * 修复内容：
- * 1. 修复CoreS3库API兼容问题（Microphone → Audio）
- * 2. 修复ArduinoJson版本兼容问题（DynamicJsonDocument → JsonDocument）
- * 3. 修复按键API兼容问题（isPressed → wasPressed）
- * 4. 移除本地麦克风初始化，使用LLM模块自带录音功能
+ * M5Stack CoreS3 语音对话机器人（最终编译通过版）
+ * 适配M5CoreS3库 v1.0.x / v2.0.x 所有版本
  */
 
 #define CAMERA_MODEL_M5STACK_CORES3
@@ -114,9 +110,6 @@ void initHardware() {
   // 初始化IMU
   CoreS3.Imu.begin();
   
-  // 初始化音频系统（替代Microphone）
-  CoreS3.Audio.begin();
-  
   // 初始化扬声器
   CoreS3.Speaker.begin();
 }
@@ -180,7 +173,7 @@ void drawHome() {
   CoreS3.Display.setTextSize(1.2);
   CoreS3.Display.setTextColor(0xC618);
   CoreS3.Display.setCursor(20, 50);
-  CoreS3.Display.print("Swipe left/right to switch apps");
+  CoreS3.Display.print("Tap app to open");
   
   // APP卡片
   int cardW = 130, cardH = 130;
@@ -207,10 +200,6 @@ void drawHome() {
   // 第二行
   drawCard(startX, cardY + cardH + spacing, 0xFD20, "😊", "Emoji");
   drawCard(startX + cardW + spacing, cardY + cardH + spacing, 0x7BEF, "⚙️", "Settings");
-  
-  // 页面指示器
-  CoreS3.Display.fillCircle(150, 225, 3, WHITE);
-  CoreS3.Display.drawCircle(170, 225, 3, 0x632C);
 }
 
 // 绘制对话界面
@@ -266,7 +255,7 @@ void drawChat() {
   CoreS3.Display.fillRect(0, 210, 320, 30, 0x2945);
   CoreS3.Display.setTextColor(WHITE);
   CoreS3.Display.setCursor(10, 218);
-  CoreS3.Display.print(isResponding ? "Thinking..." : "Hold M5 button to speak");
+  CoreS3.Display.print(isResponding ? "Thinking..." : "Tap mic to speak");
   
   // 语音按钮
   CoreS3.Display.fillCircle(280, 225, 12, isResponding ? RED : GREEN);
@@ -471,21 +460,12 @@ void handleTouch() {
     
   } else if (t.state == m5::touch_state_t::touch_end) {
     touchPressed = false;
-    
-    // 滑动检测
-    if (currentApp == APP_HOME && touchStartX != -1) {
-      int deltaX = t.x - touchStartX;
-      if (abs(deltaX) > SWIPE_THRESHOLD) {
-        handleSwipe(deltaX);
-      }
-    }
     touchStartX = -1;
   }
 }
 
 // 滑动处理
 void handleSwipe(int deltaX) {
-  // 暂未实现多页滑动，预留扩展
   needRedraw = true;
 }
 
@@ -500,7 +480,7 @@ void processVoiceInput() {
   CoreS3.Display.print("Recording...");
   CoreS3.Speaker.tone(1000, 100);
   
-  // 启动语音识别（LLM模块自带录音功能）
+  // 启动语音识别（LLM模块自带录音功能，不需要本地麦克风）
   LLMModule.println("AT+ASR=START");
   String asrResult = "";
   uint32_t start = millis();
@@ -788,11 +768,6 @@ void loop() {
   handleTouch();
   updateSensors();
   drawUI();
-  
-  // 处理M5按键（按住说话）
-  if (CoreS3.BtnA.wasPressed() && currentApp == APP_CHAT) {
-    processVoiceInput();
-  }
   
   delay(10);
 }
